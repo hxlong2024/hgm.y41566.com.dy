@@ -14,7 +14,7 @@ from webdriver_manager.core.os_manager import ChromeType
 
 # --- 页面配置 ---
 st.set_page_config(page_title="云端网盘搜", page_icon="☁️", layout="wide")
-st.title("☁️ 网盘资源搜索器 ()")
+st.title("")
 
 # --- 核心爬虫函数 ---
 def get_driver():
