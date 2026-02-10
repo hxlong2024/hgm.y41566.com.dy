@@ -13,17 +13,19 @@ from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.core.os_manager import ChromeType
 
 # --- 页面配置 ---
-st.set_page_config(page_title="云端网盘搜", page_icon="☁️")
-st.title("☁️ 网盘资源搜索器 ")
+st.set_page_config(page_title="云端网盘搜", page_icon="☁️", layout="wide")
+st.title("☁️ 网盘资源搜索器 ()")
 
 # --- 核心爬虫函数 ---
 def get_driver():
     chrome_options = Options()
     
+    # ------------------------------------------
     # Streamlit Cloud 部署必须的设置
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+    # ------------------------------------------
+    chrome_options.add_argument("--headless")  # 必须无头
+    chrome_options.add_argument("--no-sandbox") # 必须禁用沙盒
+    chrome_options.add_argument("--disable-dev-shm-usage") # 解决内存不足
     chrome_options.add_argument("--disable-gpu")
     
     # 伪装 UA
@@ -35,6 +37,7 @@ def get_driver():
     chrome_options.add_experimental_option("prefs", prefs)
     chrome_options.page_load_strategy = 'eager'
 
+    # 使用 webdriver_manager 安装适合 Linux 的 Chromium 驱动
     return webdriver.Chrome(
         service=Service(
             ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
@@ -44,10 +47,9 @@ def get_driver():
 
 def extract_pwd(text_context):
     """
-    辅助函数：提取提取码
-    兼容中文冒号 '：' 和英文冒号 ':'
+    辅助函数：从文本中提取提取码
+    支持中文冒号 '：' 和英文冒号 ':'
     """
-    # 匹配 "提取码" 后面的冒号和4位字符
     match = re.search(r'提取码\s*[:：]\s*([a-zA-Z0-9]{4})', text_context)
     if match:
         return match.group(1)
@@ -72,8 +74,7 @@ def scrape_data(keyword):
         btn = driver.find_element(By.ID, "submitSearch")
         driver.execute_script("arguments[0].click();", btn)
         
-        # 4. 等待结果
-        # 【修改点1】改为等待 .info 出现，因为有的结果可能没有 js-title
+        # 4. 等待结果 (只要有 info 出现就开始解析)
         try:
             wait.until(EC.presence_of_element_located((By.CLASS_NAME, "info")))
             time.sleep(0.5)
@@ -83,47 +84,51 @@ def scrape_data(keyword):
         # 5. 解析
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         results = []
-        boxes = soup.find_all("div", class_="access-box")
         
-        for box in boxes:
-            # --- 【修复点2】标题提取逻辑 ---
+        # 【关键修复】不再抓 access-box，而是抓所有的 info
+        # 因为 access-box 和 box 里面都有 info，这样就不会漏掉任何一个结果
+        all_infos = soup.find_all("div", class_="info")
+        
+        for info_div in all_infos:
+            # 获取 info 的父级容器，方便找 js-title
+            parent_box = info_div.parent
+            
+            # --- 修复标题提取逻辑 ---
             title = ""
-            # 策略 A: 优先找 js-title (标准情况)
-            title_tag = box.find(class_="js-title")
+            
+            # 策略 A: 先在父级找 js-title (标准情况)
+            title_tag = parent_box.find(class_="js-title")
             if title_tag:
                 title = title_tag.get_text(strip=True)
             
-            # 策略 B: 如果没有 js-title，去 info 里找第一段文本 (你遇到的情况)
-            info_div = box.find("div", class_="info")
-            if not title and info_div:
-                # stripped_strings 获取所有非标签文本
+            # 策略 B: 如果没有 js-title，直接读 info 里的第一段纯文本
+            if not title:
+                # stripped_strings 会提取所有非标签的纯文本
                 for text in info_div.stripped_strings:
-                    # 排除掉 "链接：" "提取码：" 等功能性文字，剩下的长文本就是标题
+                    # 跳过 "链接" "提取码" 等字眼，剩下的就是标题
                     if "链接" not in text and "提取码" not in text and len(text) > 1:
-                        # 【关键】去掉两边的引号 "
+                        # 去掉两边的引号 "
                         title = text.strip('"').strip()
                         break
             
             if not title:
-                title = "未知资源" # 兜底
+                title = "未知资源"
 
+            # 准备数据容器
             baidu_data = None
             quark_data = None
             
-            # --- 【修复点3】获取完整文本用于查找提取码 ---
-            full_text_context = ""
-            if info_div:
-                visible_text = info_div.get_text(separator=" ", strip=True)
-                # 获取按钮里的隐藏文本
-                copy_btn = info_div.find("button", class_="js-copy")
-                clipboard_text = copy_btn.get("data-clipboard-text", "") if copy_btn else ""
-                full_text_context = visible_text + " " + clipboard_text
+            # --- 获取完整文本上下文用于查找提取码 ---
+            visible_text = info_div.get_text(separator=" ", strip=True)
+            copy_btn = info_div.find("button", class_="js-copy")
+            clipboard_text = copy_btn.get("data-clipboard-text", "") if copy_btn else ""
+            full_text_context = visible_text + " " + clipboard_text
 
-            # --- 【修复点4】正则升级 ---
-            # 原来的正则遇到 ? 就停了，现在改为匹配直到遇到空格或引号，能匹配完整链接
+            # --- 提取链接 ---
+            # 正则匹配完整 URL
             all_links = re.findall(r'(https?://(?:pan\.baidu\.com|pan\.quark\.cn|pan\.xunlei\.com)[^\s"<>]+)', full_text_context)
             
-            # 提取密码
+            # 尝试从文本中提取密码
             pwd = extract_pwd(full_text_context)
 
             for link in all_links:
@@ -139,6 +144,7 @@ def scrape_data(keyword):
                 elif "quark.cn" in link:
                     quark_data = {"url": link, "pwd": None} 
             
+            # 只有当至少有一个有效链接时才添加结果
             if baidu_data or quark_data:
                 results.append({"title": title, "baidu": baidu_data, "quark": quark_data})
                 
@@ -171,7 +177,6 @@ if st.button("搜索"):
                                 url = item['baidu']['url']
                                 pwd = item['baidu']['pwd']
                                 label = f"[百度网盘]({url})"
-                                # 如果有提取码，显示在链接旁边
                                 if pwd:
                                     label += f" (码: `{pwd}`)"
                                 st.markdown(label)
