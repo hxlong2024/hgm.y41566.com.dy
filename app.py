@@ -45,6 +45,16 @@ def get_driver():
         options=chrome_options
     )
 
+def extract_pwd(text_context):
+    """
+    辅助函数：从文本中提取提取码
+    支持中文冒号 '：' 和英文冒号 ':'
+    """
+    match = re.search(r'提取码\s*[:：]\s*([a-zA-Z0-9]{4})', text_context)
+    if match:
+        return match.group(1)
+    return None
+
 def scrape_data(keyword):
     driver = None
     try:
@@ -65,8 +75,9 @@ def scrape_data(keyword):
         driver.execute_script("arguments[0].click();", btn)
         
         # 4. 等待结果
+        # 注意：这里改为等待 .info 出现，因为有的结果没有 .js-title
         try:
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "js-title")))
+            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "info")))
             time.sleep(0.5)
         except:
             return []
@@ -77,27 +88,62 @@ def scrape_data(keyword):
         boxes = soup.find_all("div", class_="access-box")
         
         for box in boxes:
+            # --- 修复标题提取逻辑 ---
+            title = ""
+            # 方案 A: 尝试获取标准的 js-title
             title_tag = box.find(class_="js-title")
-            if not title_tag: continue
-            title = title_tag.get_text(strip=True)
+            if title_tag:
+                title = title_tag.get_text(strip=True)
             
-            baidu = None
-            quark = None
+            # 方案 B: 如果没有 js-title，去 info 里找第一段非链接的文本
+            info_div = box.find("div", class_="info")
+            if not title and info_div:
+                # stripped_strings 会提取所有非标签的纯文本
+                for text in info_div.stripped_strings:
+                    # 跳过典型的标签文字，找到真正的标题
+                    if "链接" not in text and "提取码" not in text and len(text) > 1:
+                        # 去掉可能存在的引号
+                        title = text.strip('"').strip()
+                        break
             
-            info = box.find("div", class_="info")
-            if info:
-                # 获取所有文本（包含隐藏在按钮里的）
-                full_text = str(info) 
-                
-                # 正则匹配链接
-                bd = re.search(r'(https?://pan\.baidu\.com/s/[a-zA-Z0-9\-_]+)', full_text)
-                if bd: baidu = bd.group(1)
-                
-                qk = re.search(r'(https?://pan\.quark\.cn/s/[a-zA-Z0-9\-_]+)', full_text)
-                if qk: quark = qk.group(1)
+            if not title:
+                title = "未知资源"
+
+            # 准备数据容器
+            baidu_data = None
+            quark_data = None
             
-            if baidu or quark:
-                results.append({"title": title, "baidu": baidu, "quark": quark})
+            # --- 获取完整文本上下文用于查找提取码 ---
+            full_text_context = ""
+            if info_div:
+                visible_text = info_div.get_text(separator=" ", strip=True)
+                copy_btn = info_div.find("button", class_="js-copy")
+                clipboard_text = copy_btn.get("data-clipboard-text", "") if copy_btn else ""
+                full_text_context = visible_text + " " + clipboard_text
+
+            # --- 提取链接 ---
+            # 正则匹配完整 URL，包括可能存在的参数
+            all_links = re.findall(r'(https?://(?:pan\.baidu\.com|pan\.quark\.cn|pan\.xunlei\.com)[^\s"<>]+)', full_text_context)
+            
+            # 尝试从文本中提取密码
+            pwd = extract_pwd(full_text_context)
+
+            for link in all_links:
+                if "baidu.com" in link:
+                    # 如果找到了密码且 URL 里没有 pwd 参数，自动拼接上去
+                    final_url = link
+                    if pwd and "pwd=" not in link:
+                        connector = "&" if "?" in link else "?"
+                        final_url = f"{link}{connector}pwd={pwd}"
+                    
+                    baidu_data = {"url": final_url, "pwd": pwd}
+                    
+                elif "quark.cn" in link:
+                    quark_data = {"url": link, "pwd": None} # 夸克通常不需要提取码
+            
+            # 只有当至少有一个有效链接时才添加结果
+            if baidu_data or quark_data:
+                results.append({"title": title, "baidu": baidu_data, "quark": quark_data})
                 
         return results
         
@@ -119,8 +165,27 @@ if st.button("搜索"):
                 for item in data:
                     with st.container(border=True):
                         st.write(f"🎬 **{item['title']}**")
-                        if item['baidu']: st.markdown(f"[百度网盘]({item['baidu']})")
-                        if item['quark']: st.markdown(f"[夸克网盘]({item['quark']})")
+                        
+                        cols = st.columns(2)
+                        
+                        # 百度网盘列
+                        with cols[0]:
+                            if item['baidu']: 
+                                url = item['baidu']['url']
+                                pwd = item['baidu']['pwd']
+                                label = f"[百度网盘]({url})"
+                                if pwd:
+                                    label += f" (码: `{pwd}`)"
+                                st.markdown(label)
+                            else:
+                                st.caption("无百度资源")
+
+                        # 夸克网盘列
+                        with cols[1]:
+                            if item['quark']: 
+                                st.markdown(f"[夸克网盘]({item['quark']['url']})")
+                            else:
+                                st.caption("无夸克资源")
             else:
                 st.warning("未找到结果 (可能是云端IP被目标网站屏蔽，或者确实没资源)")
     else:
